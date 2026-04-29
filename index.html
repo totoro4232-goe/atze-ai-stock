@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 주식투자 분석 Studio</title>
+    <meta name="description" content="실시간 검색 중심 RICE 프롬프트 자동 생성기" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      .line-clamp-2 {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useEffect, useMemo, useRef, useState } = React;
+
+      const KOREA_STOCKS = ['삼성전자', 'SK하이닉스', 'NAVER', '카카오', 'LG에너지솔루션', '현대차', '셀트리온', '삼성SDI', '기아', 'POSCO홀딩스'];
+      const US_STOCKS = ['Apple', 'Microsoft', 'NVIDIA', 'Tesla', 'Google', 'Amazon', 'Meta', 'Netflix', 'AMD', 'Intel'];
+
+      const ETF_LIST = [
+        { name: 'SPY', desc: 'S&P500 추종 (미국 대표)', country: '🇺🇸', region: '미국' },
+        { name: 'QQQ', desc: '나스닥100 (기술주 중심)', country: '🇺🇸', region: '미국' },
+        { name: 'VOO', desc: 'S&P500 (뱅가드, 저비용)', country: '🇺🇸', region: '미국' },
+        { name: 'VTI', desc: '미국 전체시장', country: '🇺🇸', region: '미국' },
+        { name: 'SCHD', desc: '배당성장 ETF', country: '🇺🇸', region: '미국' },
+        { name: 'KODEX 200', desc: 'KOSPI200 추종', country: '🇰🇷', region: '한국' },
+        { name: 'TIGER 미국S&P500', desc: 'S&P500 원화투자', country: '🇰🇷', region: '미국' },
+        { name: 'TIGER 미국나스닥100', desc: '나스닥100 원화투자', country: '🇰🇷', region: '미국' }
+      ];
+
+      const SECTORS = [
+        { id: 'ai', name: 'AI', full: 'AI 인공지능', keywords: 'AI, LLM, GPU' },
+        { id: 'semiconductor', name: '반도체', full: '반도체', keywords: 'HBM, 메모리, 파운드리' },
+        { id: 'battery', name: '2차전지', full: '2차전지', keywords: '전기차 배터리, ESS' },
+        { id: 'bio', name: '바이오', full: '바이오/제약', keywords: '신약, CDMO, 임상' },
+        { id: 'platform', name: 'IT플랫폼', full: 'IT 플랫폼', keywords: '포털, 커머스, 핀테크' },
+        { id: 'defense', name: '방산', full: '방산', keywords: 'K-방산, 수출' }
+      ];
+
+      const TERMS = {
+        basic: [
+          { term: 'PER', full: '주가수익비율', desc: '주가 / EPS', detail: '낮을수록 저평가 가능성이 있지만 업종 특성을 함께 봐야 합니다.' },
+          { term: 'PBR', full: '주가순자산비율', desc: '주가 / BPS', detail: '1 미만이면 자산가치 대비 저평가로 보기도 합니다.' },
+          { term: 'ROE', full: '자기자본이익률', desc: '순이익 / 자기자본', detail: '기업의 자본 효율성 지표입니다. 부채비율과 함께 보세요.' }
+        ],
+        etf: [
+          { term: '운용보수', full: 'Expense Ratio', desc: 'ETF 유지 비용', detail: '장기투자에서 매우 중요합니다. 낮을수록 유리합니다.' },
+          { term: '추적오차', full: 'Tracking Error', desc: '지수와 ETF 수익률 차이', detail: '낮을수록 지수를 정확히 추종합니다.' },
+          { term: '괴리율', full: 'Premium/Discount', desc: '시장가와 NAV 차이', detail: '괴리율이 큰 ETF는 단기 매매시 주의가 필요합니다.' }
+        ]
+      };
+
+      const MENUS = [
+        { id: 'morning', name: '모닝브리핑', icon: '🌅' },
+        { id: 'recommend', name: '종목발굴', icon: '💡' },
+        { id: 'discovery', name: '내종목', icon: '🔍' },
+        { id: 'portfolio', name: '포트폴리오', icon: '💼' },
+        { id: 'etf', name: 'ETF', icon: '🏦' },
+        { id: 'terms', name: '용어', icon: '📖' }
+      ];
+
+      const STORAGE_KEYS = {
+        history: 'stock_prompt_history_v2',
+        prefs: 'stock_prompt_prefs_v2'
+      };
+
+      const getCurrentTimestamp = () => {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth() + 1;
+        const date = now.getDate();
+        const hours = now.getHours();
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        return `${year}년 ${month}월 ${date}일 ${hours}:${minutes} (KST)`;
+      };
+
+      const getTimeBasedInstruction = () => {
+        const timestamp = getCurrentTimestamp();
+        return `📅 분석 요청 시점: ${timestamp}
+⚠️ 반드시 ${timestamp} 기준 최신 데이터를 웹 검색으로 조회하세요.
+학습된 과거 데이터 사용 금지! 실시간 주가, 뉴스, 공시 정보를 검색해주세요.
+---
+`;
+      };
+
+      const PromptCard = ({ title, subtitle, children }) => (
+        <div className="rounded-3xl border border-white/40 bg-white/80 backdrop-blur-xl shadow-lg p-5">
+          <h3 className="text-lg font-bold text-slate-800">{title}</h3>
+          {subtitle && <p className="text-xs text-slate-500 mt-1 mb-4">{subtitle}</p>}
+          {children}
+        </div>
+      );
+
+      const PillButton = ({ active, onClick, children }) => (
+        <button
+          onClick={onClick}
+          className={`px-3 py-2 rounded-xl text-sm font-semibold transition-all duration-200 ${
+            active ? 'bg-slate-900 text-white shadow' : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-400'
+          }`}
+        >
+          {children}
+        </button>
+      );
+
+      function App() {
+        const [currentMenu, setCurrentMenu] = useState('recommend');
+        const [selectedStocks, setSelectedStocks] = useState([]);
+        const [generatedPrompt, setGeneratedPrompt] = useState('');
+        const [promptHistory, setPromptHistory] = useState([]);
+        const [isLoadingFromHistory, setIsLoadingFromHistory] = useState(false);
+        const [stockQuery, setStockQuery] = useState('');
+        const [termCategory, setTermCategory] = useState('basic');
+        const [expandedTerm, setExpandedTerm] = useState(null);
+        const inputRef = useRef(null);
+
+        const [recommendOpt, setRecommendOpt] = useState({ sector: 'ai', type: '성장주', period: '6개월', growthRate: '30%', count: '5개' });
+        const [morningOpt, setMorningOpt] = useState({ newsType: '정치테마', market: '한국' });
+        const [portfolioOpt, setPortfolioOpt] = useState({ totalAmount: '1000만원', strategy: '균등분산' });
+        const [etfOpt, setEtfOpt] = useState({ goal: '장기투자', style: '패시브', region: '글로벌' });
+
+        useEffect(() => {
+          try {
+            const rawHistory = localStorage.getItem(STORAGE_KEYS.history);
+            const rawPrefs = localStorage.getItem(STORAGE_KEYS.prefs);
+            if (rawHistory) setPromptHistory(JSON.parse(rawHistory));
+            if (rawPrefs) {
+              const prefs = JSON.parse(rawPrefs);
+              if (prefs.currentMenu) setCurrentMenu(prefs.currentMenu);
+              if (prefs.selectedStocks) setSelectedStocks(prefs.selectedStocks);
+            }
+          } catch (_error) {}
+        }, []);
+
+        useEffect(() => {
+          localStorage.setItem(STORAGE_KEYS.history, JSON.stringify(promptHistory));
+        }, [promptHistory]);
+
+        useEffect(() => {
+          localStorage.setItem(STORAGE_KEYS.prefs, JSON.stringify({ currentMenu, selectedStocks }));
+        }, [currentMenu, selectedStocks]);
+
+        useEffect(() => {
+          if (generatedPrompt && !isLoadingFromHistory) {
+            const menuName = MENUS.find((m) => m.id === currentMenu)?.name || '';
+            const newEntry = {
+              id: Date.now(),
+              menuId: currentMenu,
+              menu: menuName,
+              prompt: generatedPrompt,
+              time: new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+            };
+            setPromptHistory((prev) => [newEntry, ...prev].slice(0, 20));
+          }
+        }, [generatedPrompt, isLoadingFromHistory, currentMenu]);
+
+        const filteredKoreaStocks = useMemo(
+          () => KOREA_STOCKS.filter((stock) => stock.toLowerCase().includes(stockQuery.toLowerCase())),
+          [stockQuery]
+        );
+        const filteredUsStocks = useMemo(
+          () => US_STOCKS.filter((stock) => stock.toLowerCase().includes(stockQuery.toLowerCase())),
+          [stockQuery]
+        );
+        const filteredETFs = useMemo(
+          () => ETF_LIST.filter((etf) => etf.name.toLowerCase().includes(stockQuery.toLowerCase()) || etf.desc.toLowerCase().includes(stockQuery.toLowerCase())),
+          [stockQuery]
+        );
+
+        const toggleStock = (name) => {
+          setSelectedStocks((prev) => (prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name]));
+        };
+
+        const addCustomStock = () => {
+          if (!inputRef.current) return;
+          const value = inputRef.current.value.trim();
+          if (!value) return;
+          setSelectedStocks((prev) => (prev.includes(value) ? prev : [...prev, value]));
+          inputRef.current.value = '';
+        };
+
+        const clearStocks = () => setSelectedStocks([]);
+
+        const copyPrompt = async () => {
+          if (!generatedPrompt) return;
+          try {
+            await navigator.clipboard.writeText(generatedPrompt);
+            alert('✅ 복사 완료!\nChatGPT/Claude/Gemini에 붙여넣어 사용하세요.');
+          } catch (_error) {
+            const ta = document.getElementById('promptTextarea');
+            if (!ta) return;
+            ta.focus();
+            ta.select();
+            document.execCommand('copy');
+            alert('✅ 복사 완료!\nChatGPT/Claude/Gemini에 붙여넣어 사용하세요.');
+          }
+        };
+
+        const exportHistory = () => {
+          if (promptHistory.length === 0) return alert('내보낼 히스토리가 없습니다.');
+          const content = promptHistory.map((h) => `[${h.time}] ${h.menu}\n${h.prompt}\n\n`).join('');
+          const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `prompt-history-${new Date().toISOString().slice(0, 10)}.txt`;
+          a.click();
+          URL.revokeObjectURL(url);
+        };
+
+        const loadFromHistory = (entry) => {
+          setIsLoadingFromHistory(true);
+          setCurrentMenu(entry.menuId);
+          setGeneratedPrompt(entry.prompt);
+          setTimeout(() => {
+            setIsLoadingFromHistory(false);
+            document.getElementById('promptTextarea')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, 120);
+        };
+
+        const generateMorningPrompt = () => {
+          setGeneratedPrompt(`${getTimeBasedInstruction()}
+🌅 오늘의 단타 모닝브리핑
+
+R(Role): 당신은 단기 트레이딩 전문가입니다.
+I(Instruction): 최근 24시간 뉴스 + 실시간 주가를 검색해 단타 관점 핵심 종목 3~5개를 추천하세요.
+조건: 뉴스 유형=${morningOpt.newsType}, 시장=${morningOpt.market}
+필수: 각 종목의 현재가/등락률/핵심 이슈/매매전략/목표가/손절가 제시.
+
+C(Context): 당일 또는 2~3일 단타 대응.
+E(Example): 표 형식으로 순위, 뉴스 요약, 연결 고리, 전략을 출력.
+`);
+        };
+
+        const generateRecommendPrompt = () => {
+          const sector = SECTORS.find((s) => s.id === recommendOpt.sector);
+          setGeneratedPrompt(`${getTimeBasedInstruction()}
+💡 ${sector?.full || '섹터'} ${recommendOpt.type} 발굴
+
+R: 당신은 20년 경력의 베테랑 애널리스트입니다.
+I: ${recommendOpt.period} 관점에서 ${recommendOpt.growthRate} 이상 잠재력을 가진 ${recommendOpt.count} 추천.
+조건: 섹터=${sector?.full}, 키워드=${sector?.keywords}, 스타일=${recommendOpt.type}
+필수: 현재가/시총/PER/PBR/ROE/성장률/투자포인트/리스크/목표가/손절가 제시.
+
+C: 단기 이슈보다 구조적 성장성을 중시.
+E: 순위별 상세 분석 + 마지막 비교표 출력.
+`);
+        };
+
+        const generateDiscoveryPrompt = () => {
+          if (selectedStocks.length === 0) return alert('종목을 선택해주세요.');
+          setGeneratedPrompt(`${getTimeBasedInstruction()}
+🔍 관심종목 심층 분석
+
+분석 대상: ${selectedStocks.join(', ')}
+실시간 데이터(현재가/시총/52주 고저점/최근 뉴스)를 조회해 종목별 SWOT, 밸류에이션, 매수/매도 전략을 제시하세요.
+출력: 종목별 카드 요약 + 종합 비교표 + 우선순위.
+`);
+        };
+
+        const generatePortfolioPrompt = () => {
+          if (selectedStocks.length === 0) return alert('종목을 선택해주세요.');
+          setGeneratedPrompt(`${getTimeBasedInstruction()}
+💼 포트폴리오 구성
+
+종목: ${selectedStocks.join(', ')}
+총 투자금: ${portfolioOpt.totalAmount}
+배분 전략: ${portfolioOpt.strategy}
+
+요청:
+1) 종목별 점수(매력도/리스크/확신도) 계산
+2) 비중/매수수량/1차-2차 분할매수 플랜 제시
+3) 손절/익절/리밸런싱 규칙 제시
+4) 낙관·기본·비관 시나리오 기대수익률 계산
+`);
+        };
+
+        const generateEtfPrompt = () => {
+          if (selectedStocks.length === 0) return alert('ETF를 선택해주세요.');
+          setGeneratedPrompt(`${getTimeBasedInstruction()}
+🏦 ETF 비교 분석
+
+대상 ETF: ${selectedStocks.join(', ')}
+목적=${etfOpt.goal}, 스타일=${etfOpt.style}, 지역=${etfOpt.region}
+
+요청:
+1) 운용보수, 배당수익률, 추적오차, 최근 수익률 비교
+2) 초보자용 추천 ETF와 이유
+3) 목적에 맞는 ETF 포트폴리오(핵심/위성) 비중 제안
+`);
+        };
+
+        const generatePromptByMenu = () => {
+          if (currentMenu === 'morning') return generateMorningPrompt();
+          if (currentMenu === 'recommend') return generateRecommendPrompt();
+          if (currentMenu === 'discovery') return generateDiscoveryPrompt();
+          if (currentMenu === 'portfolio') return generatePortfolioPrompt();
+          if (currentMenu === 'etf') return generateEtfPrompt();
+          return null;
+        };
+
+        const showSelector = ['discovery', 'portfolio', 'etf'].includes(currentMenu);
+
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-slate-100 via-indigo-50 to-cyan-50 text-slate-800">
+            <header className="sticky top-0 z-20 border-b border-white/60 bg-white/70 backdrop-blur-xl">
+              <div className="max-w-6xl mx-auto px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h1 className="text-xl md:text-2xl font-black bg-gradient-to-r from-indigo-600 to-cyan-500 bg-clip-text text-transparent">
+                      AI 주식투자 분석 Studio
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">실시간 검색 중심 RICE 프롬프트 자동 생성기</p>
+                  </div>
+                  <div className="hidden md:flex items-center gap-2 text-xs">
+                    <span className="px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">히스토리 {promptHistory.length}개</span>
+                    <span className="px-2 py-1 rounded-full bg-cyan-100 text-cyan-700">선택종목 {selectedStocks.length}개</span>
+                  </div>
+                </div>
+                <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+                  {MENUS.map((menu) => (
+                    <PillButton
+                      key={menu.id}
+                      active={currentMenu === menu.id}
+                      onClick={() => {
+                        setCurrentMenu(menu.id);
+                        setGeneratedPrompt('');
+                      }}
+                    >
+                      {menu.icon} {menu.name}
+                    </PillButton>
+                  ))}
+                </div>
+              </div>
+            </header>
+
+            <main className="max-w-6xl mx-auto px-4 py-6 space-y-5">
+              <PromptCard title={MENUS.find((m) => m.id === currentMenu)?.name || '분석'} subtitle="옵션을 고른 뒤 아래 버튼으로 프롬프트를 생성하세요.">
+                {currentMenu === 'morning' && (
+                  <div className="grid md:grid-cols-2 gap-3">
+                    <select className="px-3 py-3 rounded-xl border border-slate-200" value={morningOpt.newsType} onChange={(e) => setMorningOpt((p) => ({ ...p, newsType: e.target.value }))}>
+                      {['정치테마', '기업공시', '글로벌이슈', '테마급등'].map((opt) => <option key={opt}>{opt}</option>)}
+                    </select>
+                    <select className="px-3 py-3 rounded-xl border border-slate-200" value={morningOpt.market} onChange={(e) => setMorningOpt((p) => ({ ...p, market: e.target.value }))}>
+                      {['한국', '미국', '전체'].map((opt) => <option key={opt}>{opt}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {currentMenu === 'recommend' && (
+                  <div className="space-y-3">
+                    <div className="grid md:grid-cols-3 gap-3">
+                      <select className="px-3 py-3 rounded-xl border border-slate-200" value={recommendOpt.sector} onChange={(e) => setRecommendOpt((p) => ({ ...p, sector: e.target.value }))}>
+                        {SECTORS.map((s) => <option key={s.id} value={s.id}>{s.full}</option>)}
+                      </select>
+                      <select className="px-3 py-3 rounded-xl border border-slate-200" value={recommendOpt.type} onChange={(e) => setRecommendOpt((p) => ({ ...p, type: e.target.value }))}>
+                        {['성장주', '가치주', '배당주'].map((opt) => <option key={opt}>{opt}</option>)}
+                      </select>
+                      <select className="px-3 py-3 rounded-xl border border-slate-200" value={recommendOpt.count} onChange={(e) => setRecommendOpt((p) => ({ ...p, count: e.target.value }))}>
+                        {['3개', '5개', '7개', '10개'].map((opt) => <option key={opt}>{opt}</option>)}
+                      </select>
+                    </div>
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <select className="px-3 py-3 rounded-xl border border-slate-200" value={recommendOpt.period} onChange={(e) => setRecommendOpt((p) => ({ ...p, period: e.target.value }))}>
+                        {['1개월', '3개월', '6개월', '1년', '3년', '5년'].map((opt) => <option key={opt}>{opt}</option>)}
+                      </select>
+                      <select className="px-3 py-3 rounded-xl border border-slate-200" value={recommendOpt.growthRate} onChange={(e) => setRecommendOpt((p) => ({ ...p, growthRate: e.target.value }))}>
+                        {['10%', '20%', '30%', '40%', '50%', '70%', '100%'].map((opt) => <option key={opt}>{opt}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                )}
+
+                {currentMenu === 'portfolio' && (
+                  <div className="grid md:grid-cols-2 gap-3">
+                    <select className="px-3 py-3 rounded-xl border border-slate-200" value={portfolioOpt.totalAmount} onChange={(e) => setPortfolioOpt((p) => ({ ...p, totalAmount: e.target.value }))}>
+                      {['1000만원', '3000만원', '5000만원', '1억원'].map((opt) => <option key={opt}>{opt}</option>)}
+                    </select>
+                    <select className="px-3 py-3 rounded-xl border border-slate-200" value={portfolioOpt.strategy} onChange={(e) => setPortfolioOpt((p) => ({ ...p, strategy: e.target.value }))}>
+                      {['균등분산', '차등배분', '집중투자'].map((opt) => <option key={opt}>{opt}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {currentMenu === 'etf' && (
+                  <div className="grid md:grid-cols-3 gap-3">
+                    <select className="px-3 py-3 rounded-xl border border-slate-200" value={etfOpt.goal} onChange={(e) => setEtfOpt((p) => ({ ...p, goal: e.target.value }))}>
+                      {['장기투자', '배당수익', '단기트레이딩'].map((opt) => <option key={opt}>{opt}</option>)}
+                    </select>
+                    <select className="px-3 py-3 rounded-xl border border-slate-200" value={etfOpt.style} onChange={(e) => setEtfOpt((p) => ({ ...p, style: e.target.value }))}>
+                      {['패시브', '액티브', '테마'].map((opt) => <option key={opt}>{opt}</option>)}
+                    </select>
+                    <select className="px-3 py-3 rounded-xl border border-slate-200" value={etfOpt.region} onChange={(e) => setEtfOpt((p) => ({ ...p, region: e.target.value }))}>
+                      {['미국', '한국', '글로벌'].map((opt) => <option key={opt}>{opt}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {currentMenu !== 'terms' && (
+                  <button onClick={generatePromptByMenu} className="mt-4 w-full rounded-2xl px-4 py-3 font-bold text-white bg-gradient-to-r from-indigo-600 to-cyan-500 hover:brightness-110 transition">
+                    ✨ 프롬프트 생성
+                  </button>
+                )}
+              </PromptCard>
+
+              {showSelector && (
+                <PromptCard title="종목/ETF 선택" subtitle="검색 + 직접입력 + 빠른 선택을 지원합니다.">
+                  <div className="grid md:grid-cols-[1fr_auto] gap-2 mb-3">
+                    <input ref={inputRef} type="text" placeholder="종목명 또는 ETF명 직접 입력 후 Enter" className="px-4 py-3 rounded-xl border border-slate-200" onKeyDown={(e) => e.key === 'Enter' && addCustomStock()} />
+                    <button onClick={addCustomStock} className="px-4 py-3 rounded-xl bg-slate-900 text-white">추가</button>
+                  </div>
+
+                  <input type="text" placeholder="목록 검색 (예: 삼성, Apple, SPY)" value={stockQuery} onChange={(e) => setStockQuery(e.target.value)} className="w-full mb-3 px-4 py-3 rounded-xl border border-slate-200" />
+
+                  {selectedStocks.length > 0 && (
+                    <div className="mb-3 p-3 rounded-xl bg-indigo-50 border border-indigo-100">
+                      <div className="flex justify-between items-center mb-2">
+                        <p className="text-sm font-bold text-indigo-700">선택됨 {selectedStocks.length}개</p>
+                        <button onClick={clearStocks} className="text-xs text-red-600">전체 해제</button>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedStocks.map((s) => (
+                          <button key={s} onClick={() => toggleStock(s)} className="px-3 py-1 rounded-full bg-indigo-600 text-white text-xs font-semibold">
+                            {s} ×
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {currentMenu === 'etf' ? (
+                    <div className="grid md:grid-cols-2 gap-2">
+                      {filteredETFs.map((e) => (
+                        <button key={e.name} onClick={() => toggleStock(e.name)} className={`text-left px-3 py-3 rounded-xl border ${selectedStocks.includes(e.name) ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-slate-200'}`}>
+                          <p className="font-semibold">{e.country} {e.name}</p>
+                          <p className={`text-xs ${selectedStocks.includes(e.name) ? 'text-slate-300' : 'text-slate-500'}`}>{e.desc}</p>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-2">🇰🇷 한국</p>
+                        <div className="flex flex-wrap gap-2">
+                          {filteredKoreaStocks.map((stock) => (
+                            <button key={stock} onClick={() => toggleStock(stock)} className={`px-3 py-2 rounded-xl text-sm border ${selectedStocks.includes(stock) ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-slate-200'}`}>
+                              {stock}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-2">🇺🇸 미국</p>
+                        <div className="flex flex-wrap gap-2">
+                          {filteredUsStocks.map((stock) => (
+                            <button key={stock} onClick={() => toggleStock(stock)} className={`px-3 py-2 rounded-xl text-sm border ${selectedStocks.includes(stock) ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-slate-200'}`}>
+                              {stock}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </PromptCard>
+              )}
+
+              {currentMenu === 'terms' && (
+                <PromptCard title="주식 용어 사전" subtitle="핵심 용어를 빠르게 복습하세요.">
+                  <div className="flex gap-2 mb-3">
+                    {Object.keys(TERMS).map((cat) => (
+                      <PillButton key={cat} active={termCategory === cat} onClick={() => { setTermCategory(cat); setExpandedTerm(null); }}>
+                        {cat}
+                      </PillButton>
+                    ))}
+                  </div>
+                  <div className="space-y-2">
+                    {TERMS[termCategory].map((t, i) => (
+                      <div key={t.term} className="rounded-xl border border-slate-200 bg-white">
+                        <button className="w-full text-left p-3" onClick={() => setExpandedTerm(expandedTerm === i ? null : i)}>
+                          <p className="font-bold text-indigo-700">{t.term} <span className="text-xs text-slate-500">({t.full})</span></p>
+                          <p className="text-sm text-slate-600">{t.desc}</p>
+                        </button>
+                        {expandedTerm === i && <p className="px-3 pb-3 text-sm text-slate-600">{t.detail}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </PromptCard>
+              )}
+
+              {generatedPrompt && (
+                <PromptCard title="생성된 RICE 프롬프트" subtitle="복사 후 ChatGPT / Claude / Gemini에 바로 붙여넣으세요.">
+                  <div className="flex gap-2 mb-3">
+                    <button onClick={copyPrompt} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold">📋 복사</button>
+                    <button onClick={() => setGeneratedPrompt('')} className="px-4 py-2 rounded-xl bg-slate-200 text-slate-700 text-sm font-semibold">초기화</button>
+                  </div>
+                  <textarea id="promptTextarea" readOnly value={generatedPrompt} className="w-full h-72 p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs leading-relaxed font-mono" />
+                </PromptCard>
+              )}
+
+              <PromptCard title="프롬프트 히스토리" subtitle="최근 생성 프롬프트를 자동 저장합니다. (최대 20개)">
+                <div className="flex gap-2 mb-3">
+                  <button onClick={exportHistory} className="px-4 py-2 rounded-xl bg-slate-900 text-white text-sm">내보내기</button>
+                  <button onClick={() => setPromptHistory([])} className="px-4 py-2 rounded-xl bg-red-100 text-red-700 text-sm">전체 삭제</button>
+                </div>
+                <div className="space-y-2 max-h-80 overflow-y-auto">
+                  {promptHistory.length === 0 && <p className="text-sm text-slate-500">아직 생성된 프롬프트가 없습니다.</p>}
+                  {promptHistory.map((h) => (
+                    <button key={h.id} onClick={() => loadFromHistory(h)} className="w-full p-3 rounded-xl border border-slate-200 bg-white text-left hover:border-indigo-300">
+                      <p className="text-sm font-bold text-slate-700">{h.menu} <span className="text-xs text-slate-400 ml-2">{h.time}</span></p>
+                      <p className="text-xs text-slate-500 mt-1 line-clamp-2">{h.prompt}</p>
+                    </button>
+                  ))}
+                </div>
+              </PromptCard>
+            </main>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+  </body>
+</html>
